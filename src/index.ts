@@ -2,6 +2,7 @@ import {
   discoverServices,
   runAction,
   createService,
+  removeService,
   followLogs as spawnLogProcess,
   type ServiceInfo,
 } from "./service.ts";
@@ -14,6 +15,7 @@ const REFRESH_MS = 3000;
 const FLASH_TTL_MS = 3000;
 const MAX_LOG_LINES = 250;
 const PAD_X = 2;
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 // ── Terminal primitives ──────────────────────────────────────────────
 
@@ -91,9 +93,25 @@ function svcEq(a: ServiceInfo[], b: ServiceInfo[]) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     const x = a[i]!, y = b[i]!;
-    if (x.name !== y.name || x.active !== y.active || x.status !== y.status) return false;
+    if (x.name !== y.name || x.active !== y.active || x.status !== y.status || x.enabled !== y.enabled) return false;
   }
   return true;
+}
+
+function getFiltered(): ServiceInfo[] {
+  if (!searchQuery) return services;
+  const q = searchQuery.toLowerCase();
+  return services.filter(s => s.name.toLowerCase().includes(q));
+}
+
+function startSpinner() {
+  spinnerFrame = 0;
+  if (spinnerTimer) clearInterval(spinnerTimer);
+  spinnerTimer = setInterval(() => { spinnerFrame = (spinnerFrame + 1) % SPINNER.length; paint(); }, 80);
+}
+
+function stopSpinner() {
+  if (spinnerTimer) { clearInterval(spinnerTimer); spinnerTimer = null; }
 }
 
 // ── State ────────────────────────────────────────────────────────────
@@ -111,7 +129,13 @@ let addForm = { name: "", command: "", field: 0 as 0 | 1 };
 let logSvc: string | null = null;
 let logLines: string[] = [];
 let logProc: ReturnType<typeof Bun.spawn> | null = null;
+let logScroll = 0;
 let refreshing = false;
+let spinnerFrame = 0;
+let spinnerTimer: Timer | null = null;
+let searchQuery = "";
+let searching = false;
+let confirmRemove: string | null = null;
 
 // ── Flash ────────────────────────────────────────────────────────────
 
@@ -147,6 +171,7 @@ async function doAction(
   msg: string,
 ) {
   busy = true;
+  startSpinner();
   paint();
   try {
     const r = await runAction(action, name);
@@ -166,6 +191,31 @@ async function doAction(
     setFlash("error", `✗ ${action} failed: ${e}`);
   } finally {
     busy = false;
+    stopSpinner();
+    setTimeout(() => void refresh(true), 500);
+  }
+}
+
+// ── Remove ───────────────────────────────────────────────────────────
+
+async function doRemove(name: string) {
+  busy = true;
+  startSpinner();
+  paint();
+  try {
+    const r = await removeService(name);
+    if (r.ok) {
+      services = services.filter(s => s.name !== name);
+      sel = clamp(sel, 0, Math.max(0, services.length - 1));
+      setFlash("success", `✓ Removed ${name}`);
+    } else {
+      setFlash("error", `✗ ${r.output || "remove failed"}`);
+    }
+  } catch (e) {
+    setFlash("error", `✗ Remove failed: ${e}`);
+  } finally {
+    busy = false;
+    stopSpinner();
     setTimeout(() => void refresh(true), 500);
   }
 }
@@ -177,6 +227,7 @@ async function submitAdd() {
   const c = addForm.command.trim();
   if (!n || !c) { setFlash("error", "Name and command required"); return; }
   busy = true;
+  startSpinner();
   paint();
   try {
     const r = await createService({ name: n, command: c, cwd: process.cwd() });
@@ -192,6 +243,7 @@ async function submitAdd() {
     setFlash("error", `✗ Create failed: ${e}`);
   } finally {
     busy = false;
+    stopSpinner();
   }
 }
 
@@ -254,7 +306,7 @@ function renderStatus(w: number): string {
     const fn = flash.tone === "success" ? chalk.green : flash.tone === "error" ? chalk.red : chalk.cyan;
     return row(fn(flash.text), w);
   }
-  if (busy) return row(chalk.cyan("⠋ Working..."), w);
+  if (busy) return row(chalk.cyan(`${SPINNER[spinnerFrame % SPINNER.length]} Working...`), w);
   return emptyRow(w);
 }
 
@@ -269,27 +321,47 @@ function hintBar(hints: [string, string][], w: number): string {
 
 function paintDashboard(w: number, h: number): string[] {
   const lines: string[] = [];
-  const fixed = 5; // header + blank + col header + status + footer
-  const maxRows = Math.max(1, h - fixed);
-  const { start, end } = visRange(services.length, sel, maxRows);
-  const vis = services.slice(start, end);
-  const cw = w - PAD_X * 2;
-  const sw = Math.min(34, Math.max(12, Math.floor(cw * 0.33)));
-  const nw = Math.max(8, cw - sw - 4);
+  const filtered = getFiltered();
+  sel = clamp(sel, 0, Math.max(0, filtered.length - 1));
 
-  // Header
-  lines.push(row(`${chalk.bold("Service Manager")}  ${chalk.dim(process.platform)}`, w));
-  lines.push(emptyRow(w));
+  const running = services.filter(s => s.active).length;
+  const total = services.length;
+  const fixed = 5; // header + search/blank + col header + status + footer
+  const maxRows = Math.max(1, h - fixed);
+  const { start, end } = visRange(filtered.length, sel, maxRows);
+  const vis = filtered.slice(start, end);
+  const cw = w - PAD_X * 2;
+  const ew = 10; // enabled column
+  const sw = Math.min(30, Math.max(12, Math.floor(cw * 0.28)));
+  const nw = Math.max(8, cw - sw - ew - 4);
+
+  // Header with summary
+  const summary = total > 0
+    ? `${chalk.dim(`${total} services ·`)} ${chalk.green(`${running} running`)} ${chalk.dim("·")} ${chalk.red(`${total - running} stopped`)}`
+    : chalk.dim("no services");
+  lines.push(row(`${chalk.bold("lazyctl")}  ${chalk.dim(process.platform)}  ${summary}`, w));
+
+  // Search bar or blank
+  if (searching || searchQuery) {
+    const cursor = searching ? chalk.inverse(" ") : "";
+    const matchInfo = searchQuery ? chalk.dim(` (${filtered.length} matches)`) : "";
+    lines.push(row(`${chalk.yellow("/")} ${searchQuery}${cursor}${matchInfo}`, w));
+  } else {
+    lines.push(emptyRow(w));
+  }
 
   // Column headers
   lines.push(row(
-    `  ${chalk.dim("●")} ${chalk.dim(fit("NAME", nw))} ${chalk.dim(fit("STATUS", sw))}`,
+    `  ${chalk.dim("●")} ${chalk.dim(fit("NAME", nw))} ${chalk.dim(fit("STATUS", sw))} ${chalk.dim(fit("ENABLED", ew))}`,
     w,
   ));
 
   // Service rows
   if (!vis.length) {
-    lines.push(row(chalk.dim("  No services found. Press ") + chalk.bold("a") + chalk.dim(" to add one."), w));
+    const msg = searchQuery
+      ? chalk.dim("  No matches. Press ") + chalk.bold("Esc") + chalk.dim(" to clear search.")
+      : chalk.dim("  No services found. Press ") + chalk.bold("a") + chalk.dim(" to add one.");
+    lines.push(row(msg, w));
   } else {
     for (let i = 0; i < vis.length; i++) {
       const s = vis[i]!;
@@ -298,8 +370,10 @@ function paintDashboard(w: number, h: number): string[] {
       const dot = s.active ? chalk.green("●") : chalk.red("●");
       const name = chalk.cyan(fit(s.name, nw));
       const status = (s.active ? chalk.green : chalk.red)(fit(s.status, sw));
-      const cursor = isSel ? chalk.yellow("❯") : " ";
-      const content = `${cursor} ${dot} ${name} ${status}`;
+      const enabled = s.enabled === undefined ? chalk.dim(fit("—", ew))
+        : s.enabled ? chalk.green(fit("yes", ew)) : chalk.dim(fit("no", ew));
+      const pointer = isSel ? chalk.yellow("❯") : " ";
+      const content = `${pointer} ${dot} ${name} ${status} ${enabled}`;
 
       lines.push(isSel ? highlightRow(content, w) : row(content, w));
     }
@@ -311,10 +385,12 @@ function paintDashboard(w: number, h: number): string[] {
   // Status
   lines.push(renderStatus(w));
 
-  // Footer
+  // Context-aware footer
+  const svc = filtered[sel];
+  const toggleLabel = svc?.active ? "stop" : "start";
   lines.push(hintBar([
-    ["↑↓", "move"], ["s", "start/stop"], ["r", "restart"],
-    ["l", "logs"], ["a", "add"], ["esc", "quit"],
+    ["↑↓", "move"], ["s", toggleLabel], ["r", "restart"],
+    ["l", "logs"], ["a", "add"], ["d", "remove"], ["/", "search"], ["esc", "quit"],
   ], w));
 
   return lines;
@@ -338,8 +414,13 @@ function paintAdd(w: number, h: number): string[] {
   // Form fields
   const label1 = chalk.dim("Name    ");
   const label2 = chalk.dim("Command ");
-  const val1 = addForm.name || chalk.dim.italic("com.user.my-app");
-  const val2 = addForm.command || chalk.dim.italic("/usr/local/bin/myapp --port 3000");
+  const cur = chalk.inverse(" ");
+  const val1 = addForm.field === 0
+    ? (addForm.name + cur)
+    : (addForm.name || chalk.dim.italic("com.user.my-app"));
+  const val2 = addForm.field === 1
+    ? (addForm.command + cur)
+    : (addForm.command || chalk.dim.italic("/usr/local/bin/myapp --port 3000"));
 
   const field1 = `${chalk.yellow("❯")} ${label1} ${val1}`;
   const field2 = `${chalk.yellow("❯")} ${label2} ${val2}`;
@@ -373,16 +454,21 @@ function paintAdd(w: number, h: number): string[] {
 function paintLogs(w: number, h: number): string[] {
   const lines: string[] = [];
 
-  // Header
-  lines.push(row(`${chalk.bold("Logs")}  ${chalk.cyan(logSvc ?? "")}`, w));
+  // Header with scroll indicator
+  const scrollInfo = logScroll > 0 ? chalk.yellow(` ↑${logScroll}`) : chalk.dim(" (live)");
+  lines.push(row(`${chalk.bold("Logs")}  ${chalk.cyan(logSvc ?? "")}${scrollInfo}`, w));
   lines.push(emptyRow(w));
 
-  // Log content
+  // Log content with scroll
   const maxRows = Math.max(1, h - 4);
-  const logs = logLines.slice(-maxRows);
-  if (!logs.length) {
+  const total = logLines.length;
+  logScroll = clamp(logScroll, 0, Math.max(0, total - maxRows));
+  if (!total) {
     lines.push(row(chalk.dim("Waiting for output..."), w));
   } else {
+    const endIdx = Math.max(0, total - logScroll);
+    const startIdx = Math.max(0, endIdx - maxRows);
+    const logs = logLines.slice(startIdx, endIdx);
     for (const ln of logs) lines.push(row(ln, w));
   }
 
@@ -393,7 +479,7 @@ function paintLogs(w: number, h: number): string[] {
   lines.push(renderStatus(w));
 
   // Footer
-  lines.push(hintBar([["esc", "back"]], w));
+  lines.push(hintBar([["↑↓", "scroll"], ["esc", "back"]], w));
 
   return lines;
 }
@@ -421,19 +507,26 @@ function onKey(buf: Buffer) {
 
   const up    = str === "\x1b[A";
   const down  = str === "\x1b[B";
+  const pgUp  = str === "\x1b[5~";
+  const pgDn  = str === "\x1b[6~";
   const esc   = buf.length === 1 && buf[0] === 0x1b;
   const enter = buf.length === 1 && buf[0] === 0x0d;
   const back  = buf.length === 1 && (buf[0] === 0x7f || buf[0] === 0x08);
   const tab   = buf.length === 1 && buf[0] === 0x09;
   const ch    = !str.startsWith("\x1b") && str.length > 0 && buf[0]! >= 0x20 ? str : null;
 
-  if (mode === "dashboard" && esc) { shutdown(); return; }
-
+  // ── Logs mode ──
   if (mode === "logs") {
-    if (esc) { stopLogs(true); setFlash("info", "Returned to dashboard"); }
+    if (esc) { stopLogs(true); logScroll = 0; setFlash("info", "Returned to dashboard"); return; }
+    const pageSize = Math.max(1, (out.rows ?? 24) - 4);
+    if (up) { logScroll += 1; paint(); return; }
+    if (down) { logScroll = Math.max(0, logScroll - 1); paint(); return; }
+    if (pgUp) { logScroll += pageSize; paint(); return; }
+    if (pgDn) { logScroll = Math.max(0, logScroll - pageSize); paint(); return; }
     return;
   }
 
+  // ── Add form mode ──
   if (mode === "add") {
     if (esc) { addForm = { name: "", command: "", field: 0 }; mode = "dashboard"; setFlash("info", "Canceled"); return; }
     if (up || down || tab) { addForm = { ...addForm, field: addForm.field === 0 ? 1 : 0 }; paint(); return; }
@@ -456,14 +549,51 @@ function onKey(buf: Buffer) {
     return;
   }
 
+  // ── Dashboard: confirm remove ──
+  if (confirmRemove) {
+    if (ch === "y" || ch === "Y") {
+      const name = confirmRemove;
+      confirmRemove = null;
+      void doRemove(name);
+      return;
+    }
+    confirmRemove = null;
+    setFlash("info", "Remove canceled");
+    return;
+  }
+
+  // ── Dashboard: search mode ──
+  if (searching) {
+    if (esc) { searching = false; searchQuery = ""; sel = 0; paint(); return; }
+    if (enter) { searching = false; paint(); return; }
+    if (back) { searchQuery = searchQuery.slice(0, -1); sel = 0; paint(); return; }
+    // Allow navigation while searching
+    const filtered = getFiltered();
+    if (up) { sel = Math.max(0, sel - 1); paint(); return; }
+    if (down) { sel = Math.min(Math.max(0, filtered.length - 1), sel + 1); paint(); return; }
+    if (ch) { searchQuery += ch; sel = 0; paint(); }
+    return;
+  }
+
+  // ── Dashboard: Esc with active search → clear search first ──
+  if (esc && searchQuery) { searchQuery = ""; sel = 0; paint(); return; }
+  if (esc) { shutdown(); return; }
+
   if (busy) return;
 
+  const filtered = getFiltered();
+  const pageSize = Math.max(1, (out.rows ?? 24) - 5);
+
   if (up || ch === "k") { sel = Math.max(0, sel - 1); paint(); return; }
-  if (down || ch === "j") { sel = Math.min(Math.max(0, services.length - 1), sel + 1); paint(); return; }
+  if (down || ch === "j") { sel = Math.min(Math.max(0, filtered.length - 1), sel + 1); paint(); return; }
+  if (pgUp) { sel = Math.max(0, sel - pageSize); paint(); return; }
+  if (pgDn) { sel = Math.min(Math.max(0, filtered.length - 1), sel + pageSize); paint(); return; }
+
+  if (ch === "/") { searching = true; paint(); return; }
   if (ch === "a") { addForm = { name: "", command: "", field: 0 }; mode = "add"; paint(); return; }
 
-  const svc = services[sel];
-  if (!svc) { if (ch && "srl".includes(ch)) setFlash("info", "No service selected"); return; }
+  const svc = filtered[sel];
+  if (!svc) { if (ch && "srld".includes(ch)) setFlash("info", "No service selected"); return; }
 
   if (ch === "s") {
     const a = svc.active ? "stop" : "start";
@@ -471,14 +601,16 @@ function onKey(buf: Buffer) {
     return;
   }
   if (ch === "r") { void doAction("restart", svc.name, `${svc.name} restarted`); return; }
+  if (ch === "d") { confirmRemove = svc.name; setFlash("info", `Remove ${svc.name}? Press y to confirm`); return; }
 
-  if (ch === "l") startLogs(svc.name);
+  if (ch === "l") { logScroll = 0; startLogs(svc.name); }
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
 
 function cleanup() {
   stopLogs(false);
+  stopSpinner();
   if (flashTimer) clearTimeout(flashTimer);
   term.showCursor();
   term.leaveAlt();

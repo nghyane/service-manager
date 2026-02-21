@@ -4,6 +4,7 @@ export interface ServiceInfo {
   name: string;
   active: boolean;
   status: string;
+  enabled?: boolean;
 }
 
 const isMac = process.platform === "darwin";
@@ -303,6 +304,55 @@ export async function createService(
   opts: CreateServiceOptions,
 ): Promise<{ ok: boolean; output: string }> {
   return isMac ? createLaunchdService(opts) : createSystemdService(opts);
+}
+
+// ── remove service ───────────────────────────────────────────────────
+
+async function removeSystemdService(name: string): Promise<{ ok: boolean; output: string }> {
+  // Locate the actual unit file
+  const show = await exec(["systemctl", "show", "-p", "FragmentPath", `${name}.service`]);
+  const path = show.stdout.replace("FragmentPath=", "").trim();
+  if (!path) return { ok: false, output: "Unit file not found" };
+
+  const stop = await exec(["sudo", "-n", "systemctl", "stop", name]);
+  if (stop.code !== 0) {
+    const se = stop.stderr.includes("sudo:") ? "sudo required – run 'sudo -v' in another terminal first" : stop.stderr;
+    return { ok: false, output: se };
+  }
+
+  const disable = await exec(["sudo", "-n", "systemctl", "disable", name]);
+  if (disable.code !== 0) {
+    return { ok: false, output: disable.stderr.includes("sudo:") ? "sudo required" : disable.stderr };
+  }
+
+  const rm = await exec(["sudo", "-n", "rm", "-f", path]);
+  if (rm.code !== 0) {
+    return { ok: false, output: rm.stderr.includes("sudo:") ? "sudo required – run 'sudo -v' in another terminal first" : rm.stderr };
+  }
+  await exec(["sudo", "-n", "systemctl", "daemon-reload"]);
+  return { ok: true, output: `Removed ${path}` };
+}
+
+async function removeLaunchdService(name: string): Promise<{ ok: boolean; output: string }> {
+  const plist = plistPaths.get(name);
+  if (!plist) return { ok: false, output: "plist not found" };
+
+  const needsSudo = plist.startsWith("/Library/LaunchDaemons");
+  const sudo = needsSudo ? ["sudo", "-n"] : [];
+
+  await exec([...sudo, "launchctl", "stop", name]);
+  await exec([...sudo, "launchctl", "unload", plist]);
+
+  const rm = await exec([...sudo, "rm", "-f", plist]);
+  if (rm.code !== 0) {
+    const se = sudoError(rm);
+    return { ok: false, output: se ?? (rm.stdout + " " + rm.stderr).trim() };
+  }
+  return { ok: true, output: `Removed ${plist}` };
+}
+
+export async function removeService(name: string): Promise<{ ok: boolean; output: string }> {
+  return isMac ? removeLaunchdService(name) : removeSystemdService(name);
 }
 
 // ── public API ───────────────────────────────────────────────────────
