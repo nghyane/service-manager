@@ -1,2 +1,7 @@
 node_modules/
+
+# Build output
 service-manager
+
+# VHS demo tape (chỉ commit demo.gif)
+demo.tape
