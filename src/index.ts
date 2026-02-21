@@ -4,8 +4,10 @@ import {
   runAction,
   createService,
   removeService,
+  getServiceDetail,
   followLogs as spawnLogProcess,
   type ServiceInfo,
+  type ServiceDetail,
 } from "./service.ts";
 import chalk from "chalk";
 import { truncateToWidth, visibleWidth, padding } from "@oh-my-pi/pi-tui";
@@ -29,6 +31,8 @@ const term = {
   leaveAlt()   { write("\x1b[?1049l"); },
   hideCursor() { write("\x1b[?25l"); },
   showCursor() { write("\x1b[?25h"); },
+  enableMouse()  { write("\x1b[?1000h\x1b[?1006h"); },
+  disableMouse() { write("\x1b[?1000l\x1b[?1006l"); },
 };
 
 // ── Line-diff screen with Synchronized Output (CSI 2026) ────────────
@@ -118,7 +122,7 @@ function stopSpinner() {
 // ── State ────────────────────────────────────────────────────────────
 
 type Tone = "success" | "error" | "info";
-type Mode = "dashboard" | "add" | "logs";
+type Mode = "dashboard" | "add" | "detail";
 
 let services: ServiceInfo[] = [];
 let sel = 0;
@@ -137,6 +141,7 @@ let spinnerTimer: Timer | null = null;
 let searchQuery = "";
 let searching = false;
 let confirmRemove: string | null = null;
+let detailSvc: ServiceDetail | null = null;
 
 // ── Flash ────────────────────────────────────────────────────────────
 
@@ -259,7 +264,6 @@ function startLogs(name: string) {
   stopLogs(false);
   logLines = [];
   logSvc = name;
-  mode = "logs";
   paint();
 
   const proc = spawnLogProcess(name);
@@ -277,6 +281,7 @@ function startLogs(name: string) {
         const parts = partial.split("\n");
         partial = parts.pop()!;
         for (const ln of parts) {
+          if (ln.startsWith("Filtering the log data using")) continue;
           logLines.push(pfx + (ln || " "));
           if (logLines.length > MAX_LOG_LINES) logLines = logLines.slice(-MAX_LOG_LINES);
         }
@@ -298,6 +303,22 @@ function startLogs(name: string) {
       if (code !== 0) setFlash("error", `${name} logs exited ${code}`);
     }
   })();
+}
+
+// ── Open detail view ─────────────────────────────────────────────────
+
+async function openDetail(name: string) {
+  logScroll = 0;
+  startLogs(name);
+  mode = "detail";
+  paint();
+  try {
+    detailSvc = await getServiceDetail(name);
+  } catch {
+    const svc = services.find(s => s.name === name);
+    if (svc) detailSvc = { ...svc };
+  }
+  paint();
 }
 
 // ── Render: Status line ──────────────────────────────────────────────
@@ -346,7 +367,7 @@ function paintDashboard(w: number, h: number): string[] {
   if (searching || searchQuery) {
     const cursor = searching ? chalk.inverse(" ") : "";
     const matchInfo = searchQuery ? chalk.dim(` (${filtered.length} matches)`) : "";
-    lines.push(row(`${chalk.yellow("/")} ${searchQuery}${cursor}${matchInfo}`, w));
+    lines.push(row(`${chalk.dim("search:")} ${searchQuery}${cursor}${matchInfo}`, w));
   } else {
     lines.push(emptyRow(w));
   }
@@ -390,8 +411,8 @@ function paintDashboard(w: number, h: number): string[] {
   const svc = filtered[sel];
   const toggleLabel = svc?.active ? "stop" : "start";
   lines.push(hintBar([
-    ["↑↓", "move"], ["s", toggleLabel], ["r", "restart"],
-    ["l", "logs"], ["a", "add"], ["d", "remove"], ["/", "search"], ["esc", "quit"],
+    ["↑↓", "move"], ["enter", "detail"], ["s", toggleLabel], ["r", "restart"],
+    ["a", "add"], ["d", "remove"], ["/", "search"], ["esc", "quit"],
   ], w));
 
   return lines;
@@ -450,22 +471,47 @@ function paintAdd(w: number, h: number): string[] {
   return lines;
 }
 
-// ── Render: Logs ─────────────────────────────────────────────────────
+// ── Render: Detail ───────────────────────────────────────────────────
 
-function paintLogs(w: number, h: number): string[] {
+function paintDetail(w: number, h: number): string[] {
   const lines: string[] = [];
+  const svc = detailSvc;
+  const name = svc?.name ?? logSvc ?? "";
+  const active = svc?.active ?? false;
+  const status = svc?.status ?? "loading…";
 
-  // Header with scroll indicator
-  const scrollInfo = logScroll > 0 ? chalk.yellow(` ↑${logScroll}`) : chalk.dim(" (live)");
-  lines.push(row(`${chalk.bold("Logs")}  ${chalk.cyan(logSvc ?? "")}${scrollInfo}`, w));
+  const dot = active ? chalk.green("●") : chalk.red("●");
+  const statusColor = active ? chalk.green : chalk.red;
+
+  // Header
+  lines.push(row(`${chalk.bold(name)}  ${dot} ${statusColor(status)}`, w));
   lines.push(emptyRow(w));
 
-  // Log content with scroll
-  const maxRows = Math.max(1, h - 4);
+  // Info section
+  const labelW = 12;
+  if (svc) {
+    const enabledStr = svc.enabled === undefined ? chalk.dim("—") : svc.enabled ? chalk.green("yes") : chalk.dim("no");
+    lines.push(row(`  ${chalk.dim(fit("Enabled", labelW))} ${enabledStr}`, w));
+    if (svc.command) {
+      lines.push(row(`  ${chalk.dim(fit("Command", labelW))} ${svc.command}`, w));
+    }
+    if (svc.path) {
+      lines.push(row(`  ${chalk.dim(fit("Path", labelW))} ${chalk.dim(svc.path)}`, w));
+    }
+  }
+  lines.push(emptyRow(w));
+
+  // Log section header
+  const scrollInfo = logScroll > 0 ? chalk.yellow(` ↑${logScroll}`) : chalk.dim(" (live)");
+  const divLen = Math.max(0, w - PAD_X * 2 - visibleWidth(` Logs${scrollInfo} `) - 2);
+  lines.push(row(`${chalk.dim("──")} ${chalk.bold("Logs")}${scrollInfo} ${chalk.dim("─".repeat(divLen))}`, w));
+
+  // Log content
+  const maxRows = Math.max(1, h - lines.length - 2);
   const total = logLines.length;
   logScroll = clamp(logScroll, 0, Math.max(0, total - maxRows));
   if (!total) {
-    lines.push(row(chalk.dim("Waiting for output..."), w));
+    lines.push(row(chalk.dim("Waiting for output…"), w));
   } else {
     const endIdx = Math.max(0, total - logScroll);
     const startIdx = Math.max(0, endIdx - maxRows);
@@ -480,7 +526,12 @@ function paintLogs(w: number, h: number): string[] {
   lines.push(renderStatus(w));
 
   // Footer
-  lines.push(hintBar([["↑↓", "scroll"], ["esc", "back"]], w));
+  const svcObj = services.find(s => s.name === name);
+  const toggleLabel = svcObj?.active ? "stop" : "start";
+  lines.push(hintBar([
+    ["s", toggleLabel], ["r", "restart"], ["d", "remove"],
+    ["↑↓", "scroll"], ["g/G", "top/bottom"], ["esc", "back"],
+  ], w));
 
   return lines;
 }
@@ -494,7 +545,7 @@ function paint() {
   let lines: string[];
   if (mode === "dashboard") lines = paintDashboard(w, h);
   else if (mode === "add") lines = paintAdd(w, h);
-  else lines = paintLogs(w, h);
+  else lines = paintDetail(w, h);
 
   flush(lines.slice(0, h));
 }
@@ -510,20 +561,40 @@ function onKey(buf: Buffer) {
   const down  = str === "\x1b[B";
   const pgUp  = str === "\x1b[5~";
   const pgDn  = str === "\x1b[6~";
+  const home  = str === "\x1b[H" || str === "\x1b[1~";
+  const end   = str === "\x1b[F" || str === "\x1b[4~";
   const esc   = buf.length === 1 && buf[0] === 0x1b;
   const enter = buf.length === 1 && buf[0] === 0x0d;
   const back  = buf.length === 1 && (buf[0] === 0x7f || buf[0] === 0x08);
   const tab   = buf.length === 1 && buf[0] === 0x09;
   const ch    = !str.startsWith("\x1b") && str.length > 0 && buf[0]! >= 0x20 ? str : null;
 
-  // ── Logs mode ──
-  if (mode === "logs") {
-    if (esc) { stopLogs(true); logScroll = 0; setFlash("info", "Returned to dashboard"); return; }
+  // Mouse wheel (SGR mode: \x1b[<65;x;yM = up, \x1b[<64;x;yM = down)
+  const mouseUp = str.match(/^\x1b\[<65;/) !== null;
+  const mouseDown = str.match(/^\x1b\[<64;/) !== null;
+
+  // ── Detail mode ──
+  if (mode === "detail") {
+    if (esc) { stopLogs(false); logScroll = 0; mode = "dashboard"; logSvc = null; detailSvc = null; paint(); return; }
     const pageSize = Math.max(1, (out.rows ?? 24) - 4);
-    if (up) { logScroll += 1; paint(); return; }
-    if (down) { logScroll = Math.max(0, logScroll - 1); paint(); return; }
+    if (up || mouseUp) { logScroll += (mouseUp ? 3 : 1); paint(); return; }
+    if (down || mouseDown) { logScroll = Math.max(0, logScroll - (mouseDown ? 3 : 1)); paint(); return; }
     if (pgUp) { logScroll += pageSize; paint(); return; }
     if (pgDn) { logScroll = Math.max(0, logScroll - pageSize); paint(); return; }
+    if (home || ch === "g") { logScroll = Math.max(0, logLines.length - 1); paint(); return; }
+    if (end || ch === "G") { logScroll = 0; paint(); return; }
+    if (!busy && detailSvc) {
+      const svc = services.find(s => s.name === detailSvc?.name);
+      if (svc) {
+        if (ch === "s") {
+          const a = svc.active ? "stop" : "start";
+          void doAction(a, svc.name, `${svc.name} ${a === "stop" ? "stopped" : "started"}`);
+          return;
+        }
+        if (ch === "r") { void doAction("restart", svc.name, `${svc.name} restarted`); return; }
+        if (ch === "d") { confirmRemove = svc.name; setFlash("info", `Remove ${svc.name}? Press y to confirm`); return; }
+      }
+    }
     return;
   }
 
@@ -567,7 +638,10 @@ function onKey(buf: Buffer) {
   if (searching) {
     if (esc) { searching = false; searchQuery = ""; sel = 0; paint(); return; }
     if (enter) { searching = false; paint(); return; }
-    if (back) { searchQuery = searchQuery.slice(0, -1); sel = 0; paint(); return; }
+    if (back) {
+      if (!searchQuery) { searching = false; paint(); return; }
+      searchQuery = searchQuery.slice(0, -1); sel = 0; paint(); return;
+    }
     // Allow navigation while searching
     const filtered = getFiltered();
     if (up) { sel = Math.max(0, sel - 1); paint(); return; }
@@ -585,8 +659,8 @@ function onKey(buf: Buffer) {
   const filtered = getFiltered();
   const pageSize = Math.max(1, (out.rows ?? 24) - 5);
 
-  if (up || ch === "k") { sel = Math.max(0, sel - 1); paint(); return; }
-  if (down || ch === "j") { sel = Math.min(Math.max(0, filtered.length - 1), sel + 1); paint(); return; }
+  if (up || ch === "k" || mouseUp) { sel = Math.max(0, sel - 1); paint(); return; }
+  if (down || ch === "j" || mouseDown) { sel = Math.min(Math.max(0, filtered.length - 1), sel + 1); paint(); return; }
   if (pgUp) { sel = Math.max(0, sel - pageSize); paint(); return; }
   if (pgDn) { sel = Math.min(Math.max(0, filtered.length - 1), sel + pageSize); paint(); return; }
 
@@ -594,7 +668,9 @@ function onKey(buf: Buffer) {
   if (ch === "a") { addForm = { name: "", command: "", field: 0 }; mode = "add"; paint(); return; }
 
   const svc = filtered[sel];
-  if (!svc) { if (ch && "srld".includes(ch)) setFlash("info", "No service selected"); return; }
+  if (!svc) { if (enter || (ch && "srd".includes(ch))) setFlash("info", "No service selected"); return; }
+
+  if (enter) { void openDetail(svc.name); return; }
 
   if (ch === "s") {
     const a = svc.active ? "stop" : "start";
@@ -603,8 +679,6 @@ function onKey(buf: Buffer) {
   }
   if (ch === "r") { void doAction("restart", svc.name, `${svc.name} restarted`); return; }
   if (ch === "d") { confirmRemove = svc.name; setFlash("info", `Remove ${svc.name}? Press y to confirm`); return; }
-
-  if (ch === "l") { logScroll = 0; startLogs(svc.name); }
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
@@ -613,6 +687,7 @@ function cleanup() {
   stopLogs(false);
   stopSpinner();
   if (flashTimer) clearTimeout(flashTimer);
+  term.disableMouse();
   term.showCursor();
   term.leaveAlt();
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
@@ -632,6 +707,7 @@ out.on("resize", () => { prevFrame = []; paint(); });
 
 term.enterAlt();
 term.hideCursor();
+term.enableMouse();
 if (process.stdin.isTTY) {
   process.stdin.setRawMode(true);
   process.stdin.resume();

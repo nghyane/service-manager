@@ -7,6 +7,15 @@ export interface ServiceInfo {
   enabled?: boolean;
 }
 
+export interface ServiceDetail {
+  name: string;
+  active: boolean;
+  status: string;
+  enabled?: boolean;
+  command?: string;
+  path?: string;
+}
+
 const isMac = process.platform === "darwin";
 
 // macOS: map service label → plist file path
@@ -357,7 +366,73 @@ export async function removeService(name: string): Promise<{ ok: boolean; output
   return isMac ? removeLaunchdService(name) : removeSystemdService(name);
 }
 
+// ── service detail ───────────────────────────────────────────────────
+
+async function getSystemdDetail(name: string): Promise<ServiceDetail> {
+  const show = await exec(["systemctl", "show", "-p", "ExecStart,FragmentPath", `${name}.service`]);
+  const props: Record<string, string> = {};
+  for (const line of show.stdout.split("\n")) {
+    const idx = line.indexOf("=");
+    if (idx > 0) props[line.slice(0, idx)] = line.slice(idx + 1);
+  }
+  let command = props["ExecStart"] ?? "";
+  const match = command.match(/argv\[\]=(.+?)(?:;|$)/);
+  if (match) command = match[1]!.trim();
+  const info = await exec(["systemctl", "is-active", `${name}.service`]);
+  return {
+    name,
+    active: info.stdout.trim() === "active",
+    status: info.stdout.trim(),
+    command: command || undefined,
+    path: props["FragmentPath"] || undefined,
+  };
+}
+
+async function findPlist(name: string): Promise<string | undefined> {
+  const dirs = [
+    `${homedir()}/Library/LaunchAgents`,
+    "/Library/LaunchAgents",
+    "/Library/LaunchDaemons",
+  ];
+  for (const dir of dirs) {
+    const path = `${dir}/${name}.plist`;
+    if (await Bun.file(path).exists()) return path;
+  }
+  return undefined;
+}
+
+async function getLaunchdDetail(name: string): Promise<ServiceDetail> {
+  const plist = plistPaths.get(name) ?? await findPlist(name);
+  const list = await exec(["launchctl", "list"]);
+  const loaded = parseLaunchctlList(list.stdout);
+  const info = loaded.get(name);
+  let command: string | undefined;
+  if (plist) {
+    try {
+      const r = await exec(["plutil", "-convert", "json", "-o", "-", plist]);
+      if (r.code === 0) {
+        const obj = JSON.parse(r.stdout);
+        if (Array.isArray(obj.ProgramArguments)) {
+          command = obj.ProgramArguments.join(" ");
+        }
+      }
+    } catch {}
+  }
+  return {
+    name,
+    active: info ? info.pid > 0 : false,
+    status: info ? (info.pid > 0 ? `running (PID ${info.pid})` : `stopped (${info.status})`) : "unloaded",
+    enabled: !!info,
+    command,
+    path: plist,
+  };
+}
+
 // ── public API ───────────────────────────────────────────────────────
+
+export async function getServiceDetail(name: string): Promise<ServiceDetail> {
+  return isMac ? getLaunchdDetail(name) : getSystemdDetail(name);
+}
 
 export async function discoverServices(): Promise<ServiceInfo[]> {
   return isMac ? discoverLaunchd() : discoverSystemd();
