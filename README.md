@@ -12,8 +12,10 @@ A terminal UI for managing system services on **macOS** (launchd) and **Linux** 
 
 - **Service discovery** — automatically lists launchd agents/daemons or systemd units
 - **Start / Stop / Restart** — control services with a single keypress
-- **Live log streaming** — tail service logs directly in the TUI
-- **Add services** — create new launchd plists or systemd unit files via a built-in form
+- **Detail view** — inspect service info (status, command, path) with live log streaming
+- **Add / Remove services** — create or delete launchd plists or systemd unit files
+- **Search & filter** — quickly find services by name
+- **Mouse support** — scroll with mouse wheel
 - **Auto-refresh** — status updates every 3 seconds
 
 ## Requirements
@@ -54,15 +56,32 @@ bun run build
 
 ## Keybindings
 
+### Dashboard
+
 | Key | Action |
 | --- | --- |
-| `↑` / `k` | Move up |
-| `↓` / `j` | Move down |
+| `↑` / `k` / scroll up | Move up |
+| `↓` / `j` / scroll down | Move down |
+| `PgUp` / `PgDn` | Page up / down |
+| `Enter` | Open detail view |
 | `s` | Start / Stop selected service |
 | `r` | Restart selected service |
-| `l` | View live logs |
 | `a` | Add a new service |
-| `Esc` | Back / Quit |
+| `d` | Remove selected service |
+| `/` | Search / filter services |
+| `Esc` | Clear search / Quit |
+
+### Detail View
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` / scroll | Scroll logs |
+| `PgUp` / `PgDn` | Page scroll |
+| `g` / `G` | Jump to top / bottom |
+| `s` | Start / Stop service |
+| `r` | Restart service |
+| `d` | Remove service |
+| `Esc` | Back to dashboard |
 
 ## License
 
