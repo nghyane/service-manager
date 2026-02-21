@@ -43,6 +43,8 @@ async function discoverSystemd(): Promise<ServiceInfo[]> {
     const parts = line.trim().split(/\s+/);
     if (parts.length < 4) continue;
     const name = parts[0]!.replace(".service", "");
+    const loadState = parts[1]!;
+    if (loadState === "not-found") continue;
     const activeState = parts[2]!;
     const enableState = enabledMap.get(name) ?? "unknown";
     services.push({
