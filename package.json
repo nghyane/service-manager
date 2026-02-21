@@ -1,0 +1,15 @@
+{
+  "name": "service-manager",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "build": "bun build src/index.ts --compile --outfile service-manager"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.9"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-tui": "^12.15.1"
+  }
+}
