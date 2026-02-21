@@ -1,7 +1,11 @@
 {
   "name": "lazyctl",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nghyane/lazyctl"
+  },
   "bin": {
     "lazyctl": "src/index.ts"
   },
