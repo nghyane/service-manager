@@ -1,13 +1,13 @@
 {
-  "name": "@nghyane/service-manager",
+  "name": "lazyctl",
   "version": "1.0.0",
   "type": "module",
   "bin": {
-    "service-manager": "src/index.ts"
+    "lazyctl": "src/index.ts"
   },
   "scripts": {
     "start": "bun src/index.ts",
-    "build": "bun build src/index.ts --compile --outfile service-manager"
+    "build": "bun build src/index.ts --compile --outfile lazyctl"
   },
   "devDependencies": {
     "@types/bun": "^1.3.9"

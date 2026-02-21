@@ -1,4 +1,4 @@
-# service-manager
+# lazyctl
 
 A terminal UI for managing system services on **macOS** (launchd) and **Linux** (systemd).
 
@@ -26,21 +26,21 @@ A terminal UI for managing system services on **macOS** (launchd) and **Linux** 
 ### Via bunx (no install needed)
 
 ```bash
-bunx @nghyane/service-manager
+bunx lazyctl
 ```
 
 ### Global install
 
 ```bash
-bun add -g @nghyane/service-manager
-service-manager
+bun add -g lazyctl
+lazyctl
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/nghyane/service-manager.git
-cd service-manager
+git clone https://github.com/nghyane/lazyctl.git
+cd lazyctl
 bun install
 bun start
 ```
@@ -49,7 +49,7 @@ bun start
 
 ```bash
 bun run build
-./service-manager
+./lazyctl
 ```
 
 ## Keybindings

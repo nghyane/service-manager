@@ -1,7 +1,7 @@
 node_modules/
 
 # Build output
-service-manager
+lazyctl
 
 # VHS demo tape (chỉ commit demo.gif)
 demo.tape
