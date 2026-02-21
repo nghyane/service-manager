@@ -20,19 +20,29 @@ A terminal UI for managing system services on **macOS** (launchd) and **Linux** 
 
 ## Install
 
+### Via bunx (no install needed)
+
+```bash
+bunx @nghyane/service-manager
+```
+
+### Global install
+
+```bash
+bun add -g @nghyane/service-manager
+service-manager
+```
+
+### From source
+
 ```bash
 git clone https://github.com/nghyane/service-manager.git
 cd service-manager
 bun install
-```
-
-## Usage
-
-```bash
 bun start
 ```
 
-Or build a standalone binary:
+### Standalone binary
 
 ```bash
 bun run build

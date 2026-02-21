@@ -1,7 +1,10 @@
 {
-  "name": "service-manager",
+  "name": "@nghyane/service-manager",
   "version": "1.0.0",
   "type": "module",
+  "bin": {
+    "service-manager": "src/index.ts"
+  },
   "scripts": {
     "start": "bun src/index.ts",
     "build": "bun build src/index.ts --compile --outfile service-manager"
